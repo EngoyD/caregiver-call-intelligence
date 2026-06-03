@@ -1,0 +1,195 @@
+{
+  "name": "Caregiver Call Intelligence",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "caregiver-call-intelligence",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        336,
+        480
+      ],
+      "id": "d5e02f38-5012-4c94-9991-e074634ccec9",
+      "name": "Webhook",
+      "webhookId": "a659a147-4d75-465d-aa05-97ffd331b653"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-5\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are analyzing a phone call transcript between a care navigator and a family caregiver of a dementia patient.\\n\\nCRITICAL FORMAT REQUIREMENT: Respond with ONLY raw JSON. Do NOT wrap your response in markdown code fences (no triple backticks). Do NOT include any preamble, explanation, or text outside the JSON object. Your entire response must start with { and end with } and be parseable by JSON.parse() with no modification.\\n\\nReturn exactly this JSON structure:\\n{\\n  \\\"summary\\\": \\\"2-3 sentence summary of the call\\\",\\n  \\\"caregiver_sentiment\\\": \\\"positive | neutral | concerned | distressed\\\",\\n  \\\"risk_signals\\\": [\\\"array of specific risk signals identified, e.g. patient fall, caregiver burnout, medication issue, cognitive decline\\\"],\\n  \\\"risk_score\\\": 0,\\n  \\\"recommended_followup\\\": \\\"specific recommended next action\\\"\\n}\\n\\nRisk score scale: 0-3 routine, 4-6 monitor closely, 7-8 escalate, 9-10 urgent intervention.\\n\\nTranscript:\\n{{ $json.body.transcript }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        528,
+        480
+      ],
+      "id": "634bba89-ea5a-4961-82f1-fda8552300a3",
+      "name": "Anthropic - Analyze Transcript",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jFdyYSbMCPfKkzqU",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Anthropic's response text comes in as $json.content[0].text\nconst anthropicText = $json.content[0].text;\n\n// Defensively strip markdown code fences if Claude included them\nlet cleaned = anthropicText.trim();\ncleaned = cleaned.replace(/^```(?:json)?\\s*\\n?/i, '');\ncleaned = cleaned.replace(/\\n?\\s*```\\s*$/i, '');\n\n// Parse with helpful error message if it fails\nlet analysis;\ntry {\n  analysis = JSON.parse(cleaned);\n} catch (error) {\n  throw new Error(`Failed to parse JSON from Anthropic: ${error.message}\\n\\nText was:\\n${anthropicText}`);\n}\n\n// Pull the original webhook data\nconst webhook = $('Webhook').item.json.body;\n\n// Normalize sentiment to match HubSpot dropdown case (Capitalized)\nconst sentiment = analysis.caregiver_sentiment\n  ? analysis.caregiver_sentiment.charAt(0).toUpperCase() + analysis.caregiver_sentiment.slice(1).toLowerCase()\n  : '';\n\n// Format risk signals: HubSpot multi-line text wants a string\nconst riskSignalsString = Array.isArray(analysis.risk_signals)\n  ? analysis.risk_signals.join(', ')\n  : (analysis.risk_signals || '');\n\n// HTML-formatted risk signals list for the note\nconst riskSignalsHtml = Array.isArray(analysis.risk_signals)\n  ? '<ul>' + analysis.risk_signals.map(s => `<li>${s}</li>`).join('') + '</ul>'\n  : `<p>${analysis.risk_signals || 'None identified'}</p>`;\n\n// Get today's date in YYYY-MM-DD format for HubSpot date picker\nconst today = new Date().toISOString().split('T')[0];\n\n// Human-readable date for note title\nconst formattedDate = new Date().toLocaleDateString('en-US', {\n  weekday: 'long',\n  year: 'numeric',\n  month: 'long',\n  day: 'numeric'\n});\n\n// Build the HTML note body (HubSpot notes render HTML)\nconst noteBody = `<p><strong>\\ud83d\\udcde Call Analysis &mdash; ${formattedDate}</strong></p>\n<p><strong>Risk Score:</strong> ${analysis.risk_score}/10<br>\n<strong>Caregiver Sentiment:</strong> ${sentiment}</p>\n<p><strong>Summary:</strong><br>${analysis.summary}</p>\n<p><strong>Risk Signals:</strong></p>${riskSignalsHtml}\n<p><strong>Recommended Followup:</strong><br>${analysis.recommended_followup || 'None'}</p>\n<hr>\n<p><strong>Full Transcript:</strong></p>\n<p>${webhook.transcript}</p>`;\n\n// Build the complete HubSpot Note API payload (with association to the contact)\nconst notePayload = {\n  properties: {\n    hs_note_body: noteBody,\n    hs_timestamp: new Date().toISOString()\n  },\n  associations: [\n    {\n      to: { id: webhook.contactId },\n      types: [\n        {\n          associationCategory: 'HUBSPOT_DEFINED',\n          associationTypeId: 202\n        }\n      ]\n    }\n  ]\n};\n\n// Return a clean, flat object for downstream nodes\nreturn [{\n  json: {\n    contactID: webhook.contactId,\n    transcript: webhook.transcript,\n    summary: analysis.summary,\n    risk_score: analysis.risk_score,\n    caregiver_sentiment: sentiment,\n    risk_signals: riskSignalsString,\n    recommended_followup: analysis.recommended_followup || '',\n    last_call_analyzed: today,\n    notePayloadJson: JSON.stringify(notePayload)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        480
+      ],
+      "id": "cce17668-1046-4e49-8292-376deaa0b110",
+      "name": "Parse Analysis"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/contacts/{{ $json.contactID }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"properties\": {\n    \"risk_score\": \"{{ $json.risk_score }}\",\n    \"call_summary\": \"{{ $json.summary }}\",\n    \"caregiver_sentiment\": \"{{ $json.caregiver_sentiment }}\",\n    \"risk_signals\": \"{{ $json.risk_signals }}\",\n    \"recommended_followup\": \"{{ $json.recommended_followup }}\",\n    \"last_call_analyzed\": \"{{ $json.last_call_analyzed }}\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        944,
+        352
+      ],
+      "id": "6cf82df1-64f7-4db5-8738-295db9ff3f67",
+      "name": "HubSpot - Update Contact",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Jib6ZtQquBKm2H4Y",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/notes",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.notePayloadJson }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        944,
+        592
+      ],
+      "id": "fc9c00b5-5711-44f3-aae7-42b436493e68",
+      "name": "HubSpot - Create Note",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Jib6ZtQquBKm2H4Y",
+          "name": "Header Auth account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Anthropic - Analyze Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic - Analyze Transcript": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Analysis": {
+      "main": [
+        [
+          {
+            "node": "HubSpot - Update Contact",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HubSpot - Create Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "66f2da68-43e2-40e5-9054-59158704973e",
+  "meta": {
+    "instanceId": "3d0e247b680dd8a0700793d0175b5918b864f76ef10518c9fcb0e5639a61e1a4"
+  },
+  "id": "GXzlfdLKbxHQj30T",
+  "tags": []
+}
